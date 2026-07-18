@@ -7,21 +7,19 @@ import (
 	"io/fs"
 	"log/slog"
 	"sort"
-
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// Migrate applies embedded SQL migrations in filename order, each in its own
-// transaction, recording applied versions in schema_migrations.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	_, err := pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version    TEXT PRIMARY KEY,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		)`)
+	_, err := pool.Exec(ctx,
+	`CREATE TABLE IF NOT EXISTS schema_migrations (
+		version    TEXT PRIMARY KEY,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`)
+
 	if err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
@@ -31,13 +29,18 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	if err != nil {
 		return fmt.Errorf("read schema_migrations: %w", err)
 	}
-	for rows.Next() {
+
+	// loops through rows and fills applied map.
+	for	rows.Next() {
 		var v string
 		if err := rows.Scan(&v); err != nil {
 			return err
 		}
 		applied[v] = true
 	}
+
+	// rows.next only returns false 
+	// if there is an error you will catch it here.
 	if rows.Err() != nil {
 		return rows.Err()
 	}
@@ -53,27 +56,35 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		if applied[version] {
 			continue
 		}
+
 		sql, err := migrationsFS.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		tx, err := pool.Begin(ctx)
+
+		transaction, err := pool.Begin(ctx)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, string(sql)); err != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("apply %s: %w", version, err)
+
+		// apply the migrations
+		if _, err := transaction.Exec(ctx, string(sql)); err != nil {
+			_ = transaction.Rollback(ctx)
+			return fmt.Errorf("apply %s : %w", version, err)
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO schema_migrations (version) VALUES ($1)`, version); err != nil {
-			_ = tx.Rollback(ctx)
+
+		// note down the migration as been completed.
+		if _, err := transaction.Exec(ctx,
+		`INSERT INTO schema_migrations (version) VALUES ($1)`, version); err != nil {
+			_ = transaction.Rollback(ctx)
 			return err
 		}
-		if err := tx.Commit(ctx); err != nil {
+
+		if err := transaction.Commit(ctx); err != nil {
 			return err
 		}
 		slog.Info("applied migration", "version", version)
+
 	}
 	return nil
 }
