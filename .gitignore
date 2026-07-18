@@ -3,3 +3,12 @@ bin/
 .env
 .vscode/
 coverage.out
+
+# Claude's private reference implementations used for teaching (docs/FRD.md
+# "Working method"). Never commit these — the repo should reflect only what
+# was actually designed and written by hand, for interview integrity.
+reference/
+
+# The author's own scratch rebuilds (CLAUDE.md working method step 4). Deleted
+# once reviewed and copied into the real tree — never committed as-is.
+scratch/

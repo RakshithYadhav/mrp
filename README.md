@@ -60,6 +60,16 @@ curl localhost:8090/api/plans
 curl -X POST localhost:8090/api/plans -d '{"item_code":"FG-000001","qty":100,"due_date":"2026-08-15"}'
 ```
 
+## Docs
+
+- [`docs/FRD.md`](docs/FRD.md) — functional requirements: what the system must do, by
+  requirement ID (FR-1 … FR-11), plus the non-functional targets this project measures
+  itself against.
+- [`docs/adr/`](docs/adr/) — architecture decision records: how each open design
+  question in the FRD was actually resolved, and why.
+- [`docs/concepts/`](docs/concepts/) — one file per day/unit: the rationale behind
+  non-obvious code choices, plus a no-notes self-check for interview-defense practice.
+
 ## Roadmap
 
 - [x] Day 1 — schema, migrations, scale seeder, masters API
