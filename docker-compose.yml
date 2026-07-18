@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mrp
+      POSTGRES_PASSWORD: mrp
+      POSTGRES_DB: mrp
+    ports:
+      - "5433:5432"  # 5433 on the host: 5432 is taken by another local project
+    volumes:
+      - mrp_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mrp"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  mrp_pgdata:
