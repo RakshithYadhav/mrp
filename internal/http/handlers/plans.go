@@ -12,12 +12,13 @@ func (h *Handlers) ListPlans(w http.ResponseWriter, r *http.Request) {
 	limit := queryInt(r, "limit", 50, 500)
 	offset := queryInt(r, "offset", 0, 0)
 
-	plans, err := repo.ListPlans(r.Context(), h.pool, limit, offset)
+	prodPlans, err := repo.ListPlans(r.Context(), h.pool, limit, offset)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	respond(w, http.StatusOK, plans)
+
+	respond(w, http.StatusOK, prodPlans)
 }
 
 type createPlanRequest struct {
@@ -27,27 +28,30 @@ type createPlanRequest struct {
 	WarehouseID int64   `json:"warehouse_id,omitempty"`
 }
 
-func (h *Handlers) CreatePlan(w http.ResponseWriter, r *http.Request) {
-	var req createPlanRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+func (h * Handlers) CreatePlan(w http.ResponseWriter, r *http.Request) {
+	var request createPlanRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.ItemCode == "" || req.Qty <= 0 {
-		respondError(w, http.StatusBadRequest, "item_code and positive qty are required")
+
+	if request.ItemCode == "" || request.Qty <= 0 {
+		respondError(w, http.StatusBadRequest, "item code and qty are required")
 		return
 	}
-	if _, err := time.Parse("2006-01-02", req.DueDate); err != nil {
+
+	if _, err := time.Parse("2006-01-02", request.DueDate); err != nil {
 		respondError(w, http.StatusBadRequest, "due_date must be YYYY-MM-DD")
 		return
 	}
 
 	id, err := repo.CreatePlan(r.Context(), h.pool, repo.CreatePlanInput{
-		ItemCode:    req.ItemCode,
-		Qty:         req.Qty,
-		DueDate:     req.DueDate,
-		WarehouseID: req.WarehouseID,
+		ItemCode: request.ItemCode,
+		Qty:         request.Qty,
+		DueDate:     request.DueDate,
+		WarehouseID: request.WarehouseID,
 	})
+
 	if err != nil {
 		respondError(w, http.StatusUnprocessableEntity, err.Error())
 		return
