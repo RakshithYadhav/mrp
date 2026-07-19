@@ -72,7 +72,10 @@ curl -X POST localhost:8090/api/plans -d '{"item_code":"FG-000001","qty":100,"du
 
 ## Roadmap
 
-- [x] Day 1 — schema, migrations, scale seeder, masters API
+- [x] Day 1 — schema, migrations, scale seeder, masters API. Hand-recoded and verified
+      end-to-end (config, db, migrate, repo, HTTP layer, `cmd/api`, `cmd/migrate` all
+      rebuilt from scratch and reviewed; `cmd/seed` kept as originally scaffolded, by
+      deliberate choice — see `docs/concepts/day-01-foundations.md`).
 - [ ] Day 2 — MRP v1: synchronous explosion + netting + backward scheduling (deliberately naive, measured)
 - [ ] Day 3 — MRP v2: async jobs, recursive CTE, bulk insert, bounded concurrency, SSE progress, advisory locks
 - [ ] Day 4 — execution: work results, backflush, ledger; stock dashboard v1 → v2 (indexes + snapshot)
