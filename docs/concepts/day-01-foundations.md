@@ -524,12 +524,295 @@ aggregate. No service layer yet, because Day 1's logic was pure CRUD — a servi
 earns its place once there's real business logic to isolate from both HTTP and SQL
 concerns (that's exactly where FR-3's MRP explosion will live).
 
-Worth noticing in `repo/plans.go`'s `CreatePlan`: it's a two-step insert — insert the row
-to get the generated `id`, then a second `UPDATE` to set `code = 'PP-' || id` — because a
-row can't reference its own just-generated identity value within the same `INSERT`'s
-values list.
+## 7. Repo layer — `internal/repo/items.go`, `internal/repo/plans.go`
 
-## 7. The seeder — `cmd/seed/main.go` (the densest file)
+### `ListItems`
+
+```sql
+SELECT id, code, name, item_type, uom, lead_time_days, lot_size_rule, fixed_lot_size, safety_stock
+FROM items
+WHERE $1 = '' OR code ILIKE '%' || $1 || '%' OR name ILIKE '%' || $1 || '%'
+ORDER BY id
+LIMIT $2 OFFSET $3
+```
+
+**Explicit column list, not `SELECT *`.** If a column is ever added or reordered, `SELECT *`
+would silently break the `Scan()` calls below it (wrong value in the wrong field, or a count
+mismatch). Listing columns explicitly means the query only breaks loudly, exactly when
+something relevant actually changes.
+
+**The optional-filter trick:** `WHERE $1 = '' OR code ILIKE ... OR name ILIKE ...`. An empty
+search string makes `$1 = ''` true for every row, so the whole `WHERE` is true for
+everything — no filtering. A non-empty search makes that clause false everywhere, falling
+through to the real `ILIKE` checks. One query handles both "give me everything" and "give me
+matches," no `if` branch needed in Go. `ILIKE` is case-insensitive `LIKE`; `'%' || $1 || '%'`
+means "any characters, then the search text, then any characters" — a "contains" search.
+
+**`ORDER BY id`** is required for `LIMIT`/`OFFSET` to behave predictably — Postgres makes no
+row-order guarantee at all without an explicit `ORDER BY`, so paginating without one could
+return overlapping or missing rows between page 1 and page 2.
+
+```go
+rows, err := pool.Query(ctx, ...)
+defer rows.Close()
+
+items := []domain.Item{}
+for rows.Next() {
+    var it domain.Item
+    if err := rows.Scan(&it.ID, &it.Code, &it.Name, ...); err != nil { return nil, err }
+    items = append(items, it)
+}
+return items, rows.Err()
+```
+
+- `defer rows.Close()` — `Query` borrows a connection from the pool for as long as results
+  are being read; returning early without closing leaks that connection back-to-pool.
+  `defer` guarantees it fires regardless of which `return` triggers.
+- `rows.Scan(&it.ID, &it.Code, ...)` fills multiple struct fields at once, in the *exact
+  order* of the `SELECT` list — a real fragility: reorder the columns without reordering the
+  `Scan` args, and values silently land in the wrong fields. (This exact problem is why tools
+  like `sqlc` exist — they generate this pairing from the SQL itself so it can't drift.)
+- `items := []domain.Item{}`, not `var items []domain.Item` — a `nil` slice with zero rows
+  serializes to JSON as `null`; `[]domain.Item{}` always serializes as `[]`, even empty. A
+  client doing `.map()` in JS breaks on `null`, not on `[]` — deliberate API-friendliness,
+  not accidental style.
+- `rows.Err()` after the loop — same reasoning as the migration runner: `Next()` returning
+  `false` doesn't distinguish "ran out of rows" from "an error happened partway."
+
+### `ListPlans` — introduces a JOIN
+
+```sql
+SELECT p.id, p.code, p.item_id, i.code, i.name, p.qty, p.due_date, p.warehouse_id, p.status, p.created_at
+FROM production_plans p
+JOIN items i ON i.id = p.item_id
+```
+
+A `JOIN` combines rows from two tables where a condition matches — here, each plan's
+`item_id` matched against that item's `id` — producing one combined row to pull columns from
+both tables out of. This is exactly the mechanism behind `ProductionPlan.ItemCode`/`ItemName`
+(§2): one round trip that gets the plan and its item's display info together, instead of
+querying once per plan afterward to look up its item — the classic "N+1 queries" problem (1
+query for plans, then N more, one per plan, for their items).
+
+Subtlety: both `p` and `i` have a column literally named `code`, both selected — Postgres
+gives the output two columns both named `code`. Harmless here because `Scan()` reads by
+**position**, not name — but it would silently break with a name-based scanning approach
+(e.g. `pgx.RowToStructByName`), which needs unique column names (would need
+`i.code AS item_code`). Worth flagging now even though nothing's broken yet.
+
+### `CreatePlan` — the meatier one, step by step
+
+1. `tx, err := pool.Begin(ctx)` — same transaction concept as the migration runner, different
+   reason: several related reads and writes (look up the item, look up a warehouse, insert
+   the plan, update its code) need to succeed or fail together.
+2. **`defer tx.Rollback(ctx)` immediately after — a new idiom.** The migration runner called
+   rollback explicitly on specific error branches; here it's deferred unconditionally right
+   after `Begin` succeeds. The trick: calling `Rollback` on an already-`Commit`ted transaction
+   is a safe no-op, so the pattern becomes "assume failure by default; the only way to avoid
+   the rollback is to explicitly reach `Commit()` at the end." Every early error `return`
+   auto-cleans-up via the deferred rollback — nothing to remember on each error path.
+3. **Looking up the item:**
+   `tx.QueryRow(ctx, "SELECT id, item_type FROM items WHERE code = $1", in.ItemCode).Scan(&itemID, &itemType)`.
+   `QueryRow` (vs `Query`) is for expecting exactly 0 or 1 row — simpler than `Query` +
+   `rows.Next()` + `rows.Close()` for a single lookup. No match → `Scan` returns a specific,
+   known error value, `pgx.ErrNoRows` — a "sentinel error" directly comparable
+   (`err == pgx.ErrNoRows`) to detect *that* case distinctly from other failures (network
+   blip, malformed query), so the code returns a precise "item not found" instead of a
+   generic database error.
+4. **The business-rule check** (`if itemType != "make"`) enforces FR-2.1 directly inside the
+   repo function — domain logic sitting in the wrong layer by this project's own stated
+   rules (§6), present only because Day 1 never needed a service layer for pure CRUD. Not a
+   bug — the first real hint a service layer is starting to be needed.
+5. **Default warehouse fallback** — no warehouse specified → grab "any" warehouse (first by
+   id). A deliberate v1 simplification, not a real default-warehouse policy.
+6. **`INSERT INTO production_plans (...) VALUES (...) RETURNING id`.** `RETURNING` is
+   Postgres-specific: hands back column values from the just-inserted row, in the *same*
+   statement, no separate `SELECT` needed. This is exactly what the seeder's bulk `CopyFrom`
+   can't do — `RETURNING` works fine for a normal single-row `INSERT`; it's specifically the
+   `COPY` protocol that lacks it, which is why the seeder needed its read-IDs-back-by-prefix
+   workaround (§9) and this function doesn't.
+7. **The two-step insert for `code`** — insert without a code, get `id` back via `RETURNING`,
+   then `UPDATE ... SET code = 'PP-' || lpad(id::text, 6, '0')`. `lpad` (left-pad) pads the
+   id's text form with leading zeros to 6 digits (`42` → `"000042"`), for consistent sorting
+   and display regardless of digit count. Two statements because the value being padded
+   (`id`) doesn't exist as something referenceable until *after* Postgres assigns it — no way
+   to use "the id this row is about to get" inside that same row's own `INSERT`.
+8. **Both statements run through `tx`, not `pool`** — must be part of the same bundle.
+   Without a transaction, a failure between `INSERT` and `UPDATE` would permanently leave a
+   plan row with an `id` but no `code`. Wrapped in `tx`, either both take effect together
+   after `Commit`, or neither does.
+9. `return planID, tx.Commit(ctx)` — the one and only place `Commit` is called, at the very
+   end of the success path.
+
+## 8. HTTP layer — `handlers/handlers.go`, `handlers/items.go`, `handlers/plans.go`, `router.go`
+
+### Why `Handlers` is a struct with methods, when `repo` was plain functions taking `pool`
+
+```go
+type Handlers struct {
+    pool *pgxpool.Pool
+}
+
+func New(pool *pgxpool.Pool) *Handlers {
+    return &Handlers{pool: pool}
+}
+```
+
+`New(pool)` is a constructor — build one `Handlers` value once, at startup, handing it the
+already-connected pool from outside, rather than each handler reaching out and connecting
+itself. This is **dependency injection**: code is *given* what it depends on, rather than
+creating or looking up its own dependencies — same principle as `config.Load()` (§1),
+extended one step further: each handler is a **method** on `*Handlers`
+(`func (h *Handlers) ListItems(...)`), so it reaches `h.pool` for free instead of every
+handler function needing `pool` threaded in by hand on every call, which `router.go` would
+then have to pass through every single route registration.
+
+### `Health` vs `Ready` — two different questions, on purpose
+
+```go
+func (h *Handlers) Health(w http.ResponseWriter, r *http.Request) {
+    respond(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handlers) Ready(w http.ResponseWriter, r *http.Request) {
+    if err := h.pool.Ping(r.Context()); err != nil {
+        respondError(w, http.StatusServiceUnavailable, "database unreachable")
+        return
+    }
+    respond(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+```
+
+`Health` (`/healthz`) never touches the database — it only proves the Go process is alive
+and answering requests. `Ready` (`/readyz`) pings the DB — it proves the app can serve real
+traffic right now. Maps to FR-11.2. Why they must be separate: an orchestrator (Kubernetes,
+etc.) asks liveness to decide *should I restart this process*, and readiness to decide
+*should I route traffic to it* — different questions, different consequences. If `Health`
+also checked the DB, a temporary DB blip would make the orchestrator think the *process* is
+broken and restart a perfectly healthy program — restarting it fixes nothing, the problem
+was never the process.
+
+### `respond`/`respondError` — centralizing response-writing, and why order matters
+
+```go
+func respond(w http.ResponseWriter, status int, v any) {
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(status)
+    if err := json.NewEncoder(w).Encode(v); err != nil {
+        slog.Error("encode response", "err", err)
+    }
+}
+```
+
+`http.ResponseWriter` is stateful and order-sensitive: headers must be set **before**
+`WriteHeader`, and `WriteHeader` **before** writing any body bytes — once status or body is
+written, further header changes are silently ignored. Easy to get wrong differently in every
+handler if each wrote its own response by hand; centralizing it means the order is only ever
+gotten right once, here, and every handler benefits automatically.
+
+`json.NewEncoder(w).Encode(v)`, not `json.Marshal(v)` + `w.Write(...)`: `Encode` streams JSON
+directly to `w` as it serializes, instead of building the whole string in memory first — for
+a large response, that avoids holding two full copies of the data (the Go slice and the
+fully-serialized string) at once.
+
+`respondError` isn't a separate implementation — it calls `respond` with a fixed shape,
+`{"error": "..."}`, so every error response across the whole API is structurally identical
+and reliably parseable by a client.
+
+### `queryInt` — one helper, two behaviors, via a sentinel value
+
+```go
+func queryInt(r *http.Request, key string, def, max int) int {
+    v := r.URL.Query().Get(key)
+    if v == "" { return def }
+    n, err := strconv.Atoi(v)
+    if err != nil || n < 0 { return def }
+    if max > 0 && n > max { return max }
+    return n
+}
+```
+
+Query params always arrive as strings, so this parses to int, falls back to a default if
+missing/malformed, and clamps to an upper bound so a client can't request `limit=999999999`
+and force a huge query. `queryInt(r, "limit", 50, 500)` clamps to 500;
+`queryInt(r, "offset", 0, 0)` passes `max=0`, which **disables** the clamp branch entirely —
+`offset` has no sensible upper bound (paging deep into a large list is legitimate). One
+function, two behaviors, chosen by which value is passed for `max`.
+
+### `handlers/items.go`, `handlers/plans.go` — decode input, call repo, respond
+
+`ListItems` is the simple shape: read query params, call `repo.ListItems`, `500` on error,
+`200` with the result on success — exactly the layering rule (§6): handlers never touch SQL.
+
+`CreatePlan` is the interesting one:
+
+```go
+if err := json.NewDecoder(r.Body).Decode(&req); err != nil { ... 400 ... }
+if req.ItemCode == "" || req.Qty <= 0 { ... 400 ... }
+if _, err := time.Parse("2006-01-02", req.DueDate); err != nil { ... 400 ... }
+```
+
+- `Decoder.Decode` (not `json.Unmarshal`) — same streaming reasoning as `Encode`: reads
+  directly from `r.Body` instead of requiring the whole body in memory first.
+- **Go's date format string is genuinely strange, worth knowing cold.** Go doesn't use
+  tokens like `YYYY-MM-DD` — it uses an actual reference date, `Mon Jan 2 15:04:05 MST 2006`
+  (memorable as 1,2,3,4,5,6 in order: 01/02 03:04:05PM '06), as the template.
+  `"2006-01-02"` means "4-digit year, dash, 2-digit month, dash, 2-digit day" *because*
+  that's what the reference date looks like written that way — you build a format string by
+  rearranging that exact reference date's digits into the shape you want.
+- **Why validate format/presence here, before touching the database**, when
+  `repo.CreatePlan` also validates (item exists, is a make item)? "Cheap checks first" —
+  format/presence checks are free, no network round trip. The database-dependent checks can
+  *only* be answered by querying, so they correctly live in `repo`. Two validation layers,
+  each doing exactly the checks it has the information to do.
+- **`createPlanRequest` and `repo.CreatePlanInput` are two separate types with currently
+  identical fields — deliberate**, not duplication for its own sake: one is the "wire" shape
+  (JSON-tagged, matches what a client sends), the other is what the repo function needs.
+  Keeping them distinct lets the API's request shape and the repo's input shape diverge
+  later without forcing a change to the other.
+- **`422 Unprocessable Entity` on a repo error, not `500`.** A repo error here (item not
+  found, item is a `buy` item) means the request was well-formed JSON but semantically
+  invalid — the server didn't malfunction, the *input* was wrong. `422` signals exactly
+  that, distinct from `400` (malformed) and `500` (something broke on our end).
+- **`201 Created`, not `200`, on success** — the correct status for "a new resource now
+  exists," conventionally paired with returning an identifier for the created thing.
+
+### `router.go` — chi, middleware, route grouping
+
+A router matches an incoming request's method + path against registered routes and calls
+the matching handler. `chi` is a small, widely-used router library adding path parameters
+and route grouping over stdlib `net/http`, without being a heavyweight framework.
+
+**Middleware** wraps a handler, running code before/after it, stackable via `r.Use(...)`:
+- `middleware.RequestID` — tags each request with a unique ID in its context, so log lines
+  for one request can be correlated even under concurrent traffic.
+- `middleware.RealIP` — corrects the detected client IP when behind a reverse proxy (which
+  would otherwise show the proxy's own address).
+- `middleware.Logger` — logs method/path/status/duration per request automatically.
+- `middleware.Recoverer` — catches a panic inside any handler, turning it into a logged
+  `500` for that one request instead of crashing the whole server process for every other
+  in-flight request too. Directly ties to the reliability story (FR-11).
+
+**Route grouping:**
+```go
+r.Get("/healthz", h.Health)
+r.Get("/readyz", h.Ready)
+
+r.Route("/api", func(r chi.Router) {
+    r.Get("/items", h.ListItems)
+    r.Get("/plans", h.ListPlans)
+    r.Post("/plans", h.CreatePlan)
+})
+```
+Health checks live outside `/api` — infrastructure-facing, not business API. `r.Route`
+groups everything inside the closure under that prefix automatically, so `/items` becomes
+`/api/items` without repeating the prefix on every line.
+
+**Returns `http.Handler`** — `chi`'s router satisfies the standard library's `http.Handler`
+interface (same "shared contract" idea as `fs.FS` from the embed discussion, §5), so it can
+be handed straight to `http.Server{Handler: router}` in `main.go` with no adapter needed.
+
+## 9. The seeder — `cmd/seed/main.go` (the densest file)
 
 **Bulk insert via `pgx.CopyFrom`, not `INSERT` loops.** Postgres's `COPY` protocol skips
 per-row parse/plan/bind overhead — this is why 200k ledger rows took ~13 seconds total
@@ -600,14 +883,45 @@ gives zero progress feedback. Batching trades a little overhead for visibility
    choice give up?
 9. Why does `repo/plans.go`'s `CreatePlan` need two statements (`INSERT` then `UPDATE`)
    instead of setting `code` in the original `INSERT`?
-10. Why doesn't `pgx.CopyFrom` let you get generated IDs back directly, what did the seeder
+10. Why `items := []domain.Item{}` instead of `var items []domain.Item` in `ListItems`?
+    What would the difference actually look like in the HTTP response?
+11. `ListPlans` selects both `p.code` and `i.code` in the same query — why doesn't that
+    break anything today, and what specific change would make it break?
+12. Why `defer tx.Rollback(ctx)` immediately after `Begin`, unconditionally, when the whole
+    point of the function is to `Commit` on success? What makes this safe?
+13. Why does looking up the item in `CreatePlan` use `QueryRow` instead of `Query`, and
+    what does `pgx.ErrNoRows` let the code do that a generic error wouldn't?
+14. Why doesn't `CreatePlan` need the seeder's read-IDs-back-by-prefix workaround (§9) to
+    get its new plan's `id`?
+15. Why are handlers methods on a `*Handlers` struct instead of plain functions taking
+    `pool` as a parameter, the way `repo` functions do? What is "dependency injection"
+    buying here specifically?
+16. Why must `/healthz` and `/readyz` be two separate checks with different logic, instead
+    of one endpoint that pings the database? What goes wrong if `/healthz` also checked
+    the DB?
+17. In `respond`, why does the order of `w.Header().Set(...)`, `w.WriteHeader(...)`, and
+    writing the body matter? What happens if you get the order wrong?
+18. Why `json.NewEncoder(w).Encode(v)` instead of `json.Marshal(v)` followed by `w.Write(...)`?
+19. `queryInt(r, "limit", 50, 500)` clamps but `queryInt(r, "offset", 0, 0)` doesn't — how
+    does the same function produce both behaviors, and why does `offset` not need a cap?
+20. Why does `CreatePlan`'s handler validate `ItemCode`/`Qty`/`DueDate` format *before*
+    calling `repo.CreatePlan`, when the repo function validates too? What's the difference
+    between what each layer is checking?
+21. Why are `createPlanRequest` and `repo.CreatePlanInput` two separate types with
+    currently-identical fields, instead of one shared type used in both places?
+22. Why does a failed `repo.CreatePlan` call return HTTP `422`, not `400` or `500`? What's
+    the distinction between all three in this handler's error paths?
+23. What does `middleware.Recoverer` actually prevent, concretely — what would happen to
+    *other* in-flight requests if a single handler panicked and this middleware weren't
+    registered?
+24. Why doesn't `pgx.CopyFrom` let you get generated IDs back directly, what did the seeder
     do instead, and under what condition would that workaround silently produce wrong
     results?
-11. Why build the BOM tree level-by-level instead of generating random parent/child edges
+25. Why build the BOM tree level-by-level instead of generating random parent/child edges
     and checking for cycles afterward?
-12. Why does `process_seq` in seeded BOM lines get computed from `stepCounts[parent]`
+26. Why does `process_seq` in seeded BOM lines get computed from `stepCounts[parent]`
     instead of a fixed range like 10-50?
-13. Why does the seeder take an explicit `-seed` flag instead of seeding the RNG from the
+27. Why does the seeder take an explicit `-seed` flag instead of seeding the RNG from the
     current time?
-14. Why does `seedMovements` write in 50k-row batches instead of one `CopyFrom` call for
+28. Why does `seedMovements` write in 50k-row batches instead of one `CopyFrom` call for
     all 2,000,000 rows?
