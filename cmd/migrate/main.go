@@ -7,13 +7,14 @@ import (
 
 	"github.com/rakshithyadhav/mrp-go/internal/config"
 	"github.com/rakshithyadhav/mrp-go/internal/db"
+	
 )
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
 	cfg := config.Load()
-
 	ctx := context.Background()
+
 	pool, err := db.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("connect database", "err", err)
