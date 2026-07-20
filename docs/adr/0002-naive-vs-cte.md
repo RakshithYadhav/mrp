@@ -11,6 +11,7 @@ So this decision is regarding how we actually do the BOM expansion or explosion.
 1. **Option A** — Naive Approach.
    Pros :
    - Generally the simple method.
+   - You can do unit tests
    Cons :
    - Each call network call to the db increases the network toll
 2. **Option B** — CTE With Recursion.
@@ -18,6 +19,7 @@ So this decision is regarding how we actually do the BOM expansion or explosion.
    - It saves the multiple network calls
    Cons:
    - Recursion happens in SQL code so generally more prone to bugs.
+   - Testing is difficult
 
 ## Decision
 
