@@ -132,6 +132,60 @@ docker exec mrp-go-db-1 psql -U mrp -d mrp -c "<paste the query above>"
 Try changing `WHERE bh.id = 1` to explore a different finished good, or remove the `LIMIT`
 to see the full tree. Seeing it actually run matters more than reading about it.
 
+### What a CTE actually is, if that term is fuzzy
+
+**CTE = Common Table Expression.** A way to name a temporary result set, defined right
+before the main query with `WITH`, then queried like a table within that query — it isn't
+a real table sitting in the database, it only exists for that one query's duration. "Common"
+because it can be referenced more than once within the surrounding query; "table
+expression" because it behaves like a table wherever it's used. A plain CTE is really just
+a named, reusable subquery for readability. The special case is `WITH RECURSIVE`: a
+recursive CTE is allowed to reference *itself* inside its own definition, which a plain
+subquery can never do — that self-reference is exactly what makes the tree-walking
+behavior possible: the recursive term says "take what the CTE has produced so far, find
+the next level from it."
+
+### Naive Go recursion vs the CTE, measured for real — and why Go isn't "slow"
+
+Measured against this project's own seeded data (`FG-000001`'s tree, 23 BOM headers, 94
+lines): 23 separate per-header queries over one connection took **17.994ms total**
+(0.782ms average each); the single recursive CTE fetching the same data took **9.394ms**
+in one round trip — roughly **1.9x faster on localhost**, and that gap would be
+substantially larger against a real deployed database, where each network round trip costs
+0.5–2ms of pure latency instead of localhost's ~0.05–0.1ms, and it *grows* with tree size
+since the naive approach's round-trip count scales with the number of BOM headers while the
+CTE's stays at exactly one.
+
+**Why, mechanically — and this is not "Go is slow."** In each of the 23 round trips, Go's
+own work (build the query, serialize it, deserialize the response) is microseconds —
+genuinely negligible. Almost all 17.994ms was Go's goroutine *waiting*, blocked on a
+response from a separate process (Postgres) over a network socket. Rewriting the identical
+naive pattern in Rust or C would take almost exactly as long, because the bottleneck is
+network round-trip latency, not computation speed — an entirely I/O-bound cost, not a
+CPU-bound one.
+
+**Why those round trips can't just be made concurrent.** Concurrency only helps when work
+is independent — it cannot shorten a chain where each step needs the previous step's
+result. You cannot query "what are `SUB-000477`'s children?" before you've *learned
+`SUB-000477` exists* — and you only learn that from the result of its parent's query.
+There's nothing valid to run concurrently *across* tree levels; the dependency is real, not
+artificial. Concurrency *does* help *within* one level, once it's known (5 known siblings'
+lookups are independent of each other, so they could run as 5 concurrent goroutines instead
+of 5 sequential round trips) — turning "node-many sequential round trips" into
+"depth-many sequential waves." But it can't go below depth-many, because depth is the
+actual length of the dependency chain (the critical path), and no amount of concurrency
+shortens a critical path — it only parallelizes what's independent within it.
+
+**The sharper point this leads to:** the recursive CTE has *exactly the same* level-by-level
+dependency internally — Postgres can't compute level 3 without level 2's results either,
+recursion is recursion, that structural fact doesn't disappear. The CTE isn't escaping the
+dependency chain. What it's escaping is **the cost of each link in that chain** — each hop
+between levels is an in-memory join against data Postgres already has loaded, not a network
+round trip to a separate process. The real lesson: concurrency parallelizes independent
+work; it was never going to fix a cost that comes from paying network latency once per
+unavoidable sequential step. Making each step cheap (in-memory instead of network-bound) is
+what actually fixes it — which is exactly what moving the traversal into the database does.
+
 ### Why cycle detection needs an explicit guard here
 
 A tree, by definition, has no cycles. But nothing *stops* someone from creating a BOM where
@@ -145,6 +199,34 @@ already been visited on the current path, and stop — refuse to recurse further
 you'd revisit one. In Go this is a natural `map[int64]bool` "visited" set. In SQL, the
 common pattern is carrying an array of visited IDs through the recursion and checking
 `NOT (child_item_id = ANY(visited_path))` in the recursive term's `WHERE` clause.
+
+### Why `bom_headers` + `bom_lines` instead of one flat table
+
+The obvious denormalized alternative is a single table: `(parent_item_id, child_item_id,
+qty_per)`. This project didn't pick that. Trade-offs:
+
+**What splitting into header + line buys you:**
+- **Versioning/alternates without duplicating it onto every row.** `bom_headers.name` lets
+  one item have multiple named BOMs (e.g. "Standard" vs an alt routing), each with its own
+  independent line set. A flat table would need a `bom_version` column repeated on *every*
+  line just to distinguish them.
+- **BOM-level metadata lives once.** `is_active` (and anything added later — effective date,
+  approval status) describes the BOM as a whole. Flat-table would force duplicating it across
+  every line for that BOM (inconsistent-state risk: some lines say active, some don't) or
+  spinning up a second table for it anyway — which is header+line by another name.
+- **Mirrors the source system** this project reverse-engineers (header object + line object
+  in the commercial Salesforce package) — a real precedent, not just a schema preference.
+
+**What it costs:** one extra join per level during traversal — `items → bom_headers (which
+BOM?) → bom_lines`, visible in the recursive CTE above where the recursive term joins through
+`bom_headers` before it can reach `bom_lines`. A flat table collapses that into a single join
+per level (`WHERE parent_item_id = ANY(...)`), at the cost of losing versioning and header
+metadata support outright.
+
+Net: flat is simpler if a BOM is always exactly one unversioned thing. The moment "an item
+can have more than one BOM" is a real requirement (already true here — schema supports named
+BOMs per item), header+line stops being over-engineering and becomes the minimum structure
+that can express it.
 
 ### N+1 queries and batching — the concept AD-2 turns on
 
@@ -196,3 +278,6 @@ for every item that needs it is one query regardless of tree size.
    contains a genuine cycle, with no guard in place?
 5. Why is netting inline during tree traversal naturally N+1, and what would the batched
    alternative's query actually look like?
+6. Why does this project use `bom_headers` + `bom_lines` instead of one flat
+   `(parent_item_id, child_item_id, qty_per)` table, and what requirement would have to
+   disappear for the flat version to be the better choice?
