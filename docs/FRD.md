@@ -165,6 +165,17 @@ taken on your machine, reproducible by command.
   decorative.
 - **The ledger is the only source of truth for stock** (FR-8.1) — no code path anywhere
   may write a balance column instead of a movement row.
+- **BOM is a header/lines split** (`bom_headers` + `bom_lines`), matching the real source
+  system's `CompositionPattern__c`/`Composition2__c` structure — a header represents one
+  named recipe for an item, letting multiple recipes and recipe-level metadata (name,
+  associated routing, active flag) exist without denormalizing across every line. What's
+  deliberately *not* carried over from the real system: multiple named patterns per item
+  (this schema's seeder only ever creates one `'STD'` pattern), `ChildCompositionPattern__c`
+  (the real system lets a BOM line pin a *specific variant recipe* of the child item, not
+  just the item itself), `ByProductFlag__c`/`CoProductFlag__c` (co-product/by-product
+  tracking), and `EnableStartDate__c`/`EnableEndDate__c` (per-line effectivity dates). All
+  real, all deliberately out of scope — name them precisely if asked, don't imply the
+  simpler version is the only way UMProcess itself works.
 
 ## 8. Open Architecture Decisions — yours to make
 
