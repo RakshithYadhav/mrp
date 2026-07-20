@@ -133,7 +133,7 @@ fit — that's a legitimate exercise too, not a rule you're locked into.
 
 | ID | Requirement |
 |---|---|
-| NFR-1 | MRP explosion for a representative plan (5-level BOM, ~3000 tree nodes) completes in seconds, async, with a documented before/after vs. the naive synchronous version |
+| NFR-1 | **Measured at bulk-run scale, not single-plan** — a scheduled run processing many plans together (benchmark scale: `-plans 500`), naive synchronous baseline vs. async + batched-traversal optimized version, both measured and documented in `BENCHMARKS.md`. A single plan's explosion is too fast even unoptimized (~18ms for a 23-header tree, measured 2026-07-20) to honestly substantiate a "minutes → near real-time" claim — bulk scale is what makes that number real, and mirrors why the real UMProcess system has a dedicated bulk MRP execution feature (`PmBulkExecutionMrpJobController`) rather than only single-plan runs. Directly backs `docs/RESUME.md` Bullet B. |
 | NFR-2 | Stock projection across 50 items over a 2M-row ledger completes in around a second with proper indexing — document the naive baseline and the optimized number, both measured on your machine |
 | NFR-3 | Push-to-deployed pipeline completes in under 5 minutes |
 | NFR-4 | `/readyz` reports unready (not 200) whenever the DB is unreachable; no request is accepted once shutdown drain begins |
