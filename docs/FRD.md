@@ -71,7 +71,14 @@ fit — that's a legitimate exercise too, not a rule you're locked into.
 - FR-3.5 Explosion is atomic per plan: all orders are created, or none are.
 
 ### FR-4 — Netting & Lot Sizing
-- FR-4.1 For buy-type components: `net = max(0, gross − on_hand − safety_stock)`.
+- FR-4.1 For buy-type components: `net = max(0, gross − on_hand + safety_stock)`.
+  Safety stock is a reserve that must **not** be consumed, so the stock actually available
+  to meet demand is `on_hand − safety_stock`, giving
+  `net = gross − (on_hand − safety_stock) = gross − on_hand + safety_stock`.
+  Worked: on-hand 50, safety stock 10, gross 200 → available 40 → net 160.
+  *(Corrected 2026-07-20: this requirement previously read `− safety_stock`, which
+  under-orders and silently eats into the buffer — caught while implementing Day 2. See
+  `docs/concepts/day-02-mrp-explosion.md` §5.)*
 - FR-4.2 `net > 0` generates a purchase request; `net == 0` generates nothing.
 - FR-4.3 Lot-for-lot orders exactly the net requirement. Fixed-lot rounds up to the next
   multiple of the item's `fixed_lot_size`.

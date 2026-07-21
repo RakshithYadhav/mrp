@@ -65,10 +65,20 @@ before landing (see git history of this file if curious); this is the settled ve
    here is silence, not disclosure. (One exception already exists on disk: the original
    "Day 1" commit predates this rule and does carry a Claude trailer — leave that historical
    commit as-is, do not rewrite published history to fix it, just don't repeat the mistake.)
-5. **Performance-sensitive features still get built in two stages.** A naive v1 (synchronous,
+6. **Performance-sensitive features still get built in two stages.** A naive v1 (synchronous,
    N+1, unindexed) is built and measured before it's optimized (async, set-based, indexed)
    and measured again — every number goes in `BENCHMARKS.md`, reproducible by command. Don't
    skip straight to the optimized version; don't optimize before there's a measurement.
+7. **Resume harvest after every shipped milestone — `docs/RESUME.md` is a tracked
+   deliverable.** That file maps the author's 8 submitted resume bullets (A–H) to the
+   mrp-go evidence backing each, holds drafted bullets (built strictly to the formula
+   written at the top of that file — 3 capitalized keyword phrases, 30–45 words, real
+   measured numbers only, honest attribution), and an interview dossier per bullet (the
+   hardest questions an interviewer could ask, answerable from this repo's own docs).
+   When a milestone ships, update the map's status column and draft/refine bullets for
+   what actually shipped — without being asked. Never let a bullet claim a number that
+   isn't in `BENCHMARKS.md`, and never let a personal-project bullet read as a
+   production/employer outcome.
 
 ## Commands
 
