@@ -25,6 +25,7 @@ func NewRouter(pool *pgxpool.Pool) http.Handler {
 		r.Get("/items", h.ListItems)
 		r.Get("/plans", h.ListPlans)
 		r.Post("/plans", h.CreatePlan)
+		r.Post("/plans/{id}/mrp", h.RunMRP)
 	})
 
 	return r
