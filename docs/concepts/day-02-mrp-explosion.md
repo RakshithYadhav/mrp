@@ -90,6 +90,22 @@ the previous level's results). Threading a shared `tx` through repo functions th
 take `*pgxpool.Pool` would mean reworking Day 1's repo signatures — scope creep for no gain.
 So the transaction-scoped, algorithm-coupled queries live with the algorithm.
 
+## 1a. What a production order actually is
+
+One row in `production_orders`: **"make this qty of this item, by this due date."** Created
+once per make item per occurrence in the tree (§2's recursion). Fields worth knowing cold:
+`item_id` + `qty` + `due_date` (the instruction itself), `status` (planned → released →
+in_progress → done/cancelled, not touched by explosion — that's execution, out of scope here),
+and `parent_order_id`, self-referencing `production_orders.id` — this is the seiban pegging
+tree from CLAUDE.md's data-model notes: the root order (the plan's own item) has no parent,
+and every sub-assembly's order points at the order that consumed it. Not a global "build N
+frames" bucket — a specific frame build tied to a specific bike order.
+
+Two child tables hang off each production order: **work orders** (the routing steps — cut,
+weld, paint — the "how," `process_seq`-ordered) and **component requirements** (the child
+items consumed at a specific step, the "what it needs," §4). Buy items never get a production
+order — nothing to build — they accumulate into `buyReqs` instead (§2, §5).
+
 ## 2. The recursion — `exploder.explode`
 
 One method, called once per make node, structurally: *create this node's rows, then recurse
