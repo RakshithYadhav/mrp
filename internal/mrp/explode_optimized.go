@@ -25,7 +25,7 @@ func (e *exploder) explodeOptimized(ctx context.Context, root item, qty float64)
 	// child - for one batched item lookup.
 	idSet := map[int64]bool{root.id: true}
 	for _, ed := range edges {
-		idSet[ed.parentItemID] = true
+		idSet[ed.parentItemId] = true
 		idSet[ed.childItemID] = true
 	}
 	allIDs := make([]int64, 0, len(idSet))
@@ -61,7 +61,7 @@ func (e *exploder) explodeOptimized(ctx context.Context, root item, qty float64)
 
 	edgesByParent := make(map[int64][]treeEdge, len(orderItemIDs))
 	for _, ed := range edges {
-		edgesByParent[ed.parentItemID] = append(edgesByParent[ed.parentItemID], ed)
+		edgesByParent[ed.parentItemId] = append(edgesByParent[ed.parentItemId], ed)
 	}
 
 	return e.walkNode(ctx, root.id, qty, 0, items, bomHeaders, routingSteps, edgesByParent)
