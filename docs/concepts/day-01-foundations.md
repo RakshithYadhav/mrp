@@ -517,6 +517,28 @@ the `ProductionPlan.Code`/`Name` question was fine specifically *because* nothin
 shipped anywhere else yet — that exception doesn't apply once something's out in the
 world.)
 
+## 5a. `inventory_movements` — append-only ledger, not a balance column
+
+**The alternative that was rejected:** an `items.on_hand` (or similar) mutable column,
+incremented/decremented on every receipt and issue. Simpler to read — `on_hand` is right
+there — but every concurrent movement on the same item becomes an `UPDATE` racing every
+other movement on that *same row*, a write-contention hotspot. It also destroys history:
+once updated, there's no way to answer "why is on-hand 340?" or trace it to a specific lot.
+
+**What this schema does instead:** `inventory_movements` is append-only — every receipt,
+issue, adjustment, and backflush is its own `INSERT`, with a signed `qty` (`+` receipt, `-`
+issue) and a `movement_type`. On-hand for an item is never stored; it's always
+`SUM(qty) WHERE item_id = ?` computed at read time. Writes become independent inserts (no
+shared row to contend on), and the full history stays queryable and auditable — reconstruct
+on-hand as of any point in time, trace any quantity back to the movements that produced it.
+
+**The trade explicitly accepted:** this makes writes fast and reads expensive — every
+on-hand lookup scans/aggregates the ledger instead of reading one column. That expense is
+deliberate, the same naive-then-measure-then-optimize shape as the MRP explosion itself:
+`net_optimized.go`'s `SELECT item_id, SUM(qty) FROM inventory_movements WHERE item_id =
+ANY($1) GROUP BY item_id` is the current cost, and Day 4's indexing/snapshot-table work is
+what's meant to measure and fix it — not a signal the ledger design was wrong.
+
 ## 6. Layering — `router.go` → `handlers/` → `repo/`
 
 Handlers only decode/validate/respond — no SQL. Repo files hold all SQL, one per

@@ -303,6 +303,23 @@ Same formula, same lot-sizing, as Day 2's `net()`. The only change:
 replaces the per-buy-item `SELECT SUM(qty) WHERE item_id = $1` loop — one round trip for every
 buy item's on-hand total, regardless of how many there are.
 
+**Why `sort.Slice(itemIDs, ...)` before either query.** `itemIDs` comes from ranging over
+`e.buyReqs`, a map — Go randomizes map iteration order per range, so without sorting, the id
+list (and therefore the order purchase-request rows get inserted, and their auto-increment
+ids) would be non-deterministic run to run. Not a correctness issue — `loadItemsBatch` and
+the grouped on-hand query both return maps (order-irrelevant), and each item's `net` depends
+only on its own values. It exists purely so `BENCHMARKS.md` timings and the Day-2-vs-Day-3
+equivalence check are comparing like for like, not chasing order noise.
+
+**Why `COALESCE(SUM(qty), 0)` — and why it's actually inert here.** `SUM()` returns `NULL`
+for an empty group; `COALESCE` is the standard guard so `NULL - onHand + safetyStock` doesn't
+poison the whole calc. But this query is a plain `GROUP BY` on `inventory_movements` itself —
+not a `LEFT JOIN` from `items` — so a group only exists if at least one row matched, and
+`qty` is `NOT NULL` in the schema. An item with zero movements produces no row at all, not a
+row with `SUM = NULL`, and `onHand[itemID]` on a missing map key already reads as Go's zero
+value. So the `COALESCE` never actually fires here; it would matter if this were rewritten as
+`items LEFT JOIN inventory_movements` instead.
+
 ## 4. Why both versions are kept, not one replacing the other
 
 `Explode` (Day 2) and `ExplodeOptimized` (Day 3) both exist, both callable, both tested for
