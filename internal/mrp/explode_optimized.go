@@ -1,44 +1,33 @@
-// Optimized (v2) tree walk. Kept side by side with Day 2's explode.go
-// deliberately — same output (production_orders/work_orders/
-// component_requirements/buyReqs), same insert helpers reused unchanged, the
-// only difference is that every lookup here is a map read against data
-// loaded once upfront (tree.go), not a query issued per node. This is what
-// lets both versions be measured and compared, and eventually toggled from a
-// UI, instead of one replacing the other.
 package mrp
 
-import (
-	"context"
-	"fmt"
-)
+import ("context"
+	"fmt")
 
-// explodeOptimized loads the whole tree in one recursive CTE (loadTree), then
-// batch-loads every item/BOM-header/routing-step it needs in a fixed handful
-// of queries (not one per node), then walks the already-in-memory result.
+
 func (e *exploder) explodeOptimized(ctx context.Context, root item, qty float64) error {
 	edges, err := e.loadTree(ctx, root.id, qty)
 	if err != nil {
-		return err // ErrCycle surfaces here, before any writes (FR-3.4)
+		return err
 	}
 
-	// Every distinct item id appearing anywhere - root, every parent, every
-	// child - for one batched item lookup.
+	// this is a set which gets all unique item ids from the tree.
 	idSet := map[int64]bool{root.id: true}
 	for _, ed := range edges {
 		idSet[ed.parentItemId] = true
 		idSet[ed.childItemID] = true
 	}
+
+	// collect all the unique ids.
 	allIDs := make([]int64, 0, len(idSet))
 	for id := range idSet {
 		allIDs = append(allIDs, id)
 	}
+
 	items, err := e.loadItemsBatch(ctx, allIDs)
 	if err != nil {
 		return err
 	}
 
-	// A production order is needed for root, plus every child that turns out
-	// to be a make item - buy children never get one, they become buyReqs.
 	orderIDSet := map[int64]bool{root.id: true}
 	for _, ed := range edges {
 		if items[ed.childItemID].itemType == "make" {
@@ -67,9 +56,6 @@ func (e *exploder) explodeOptimized(ctx context.Context, root item, qty float64)
 	return e.walkNode(ctx, root.id, qty, 0, items, bomHeaders, routingSteps, edgesByParent)
 }
 
-// walkNode creates one item's production order, work orders, and component
-// requirements, then recurses into make children - identical shape to Day
-// 2's explode(), but every lookup here is a map read, not a query.
 func (e *exploder) walkNode(
 	ctx context.Context,
 	itemID int64,
@@ -82,7 +68,7 @@ func (e *exploder) walkNode(
 ) error {
 	bomHeaderID, hasBom := bomHeaders[itemID]
 
-	orderID, err := e.insertProductionOrder(ctx, itemID, bomHeaderID, hasBom, qty, parentOrderID)
+	orderId, err := e.insertProductionOrder(ctx, itemID, bomHeaderID, hasBom, qty, parentOrderID)
 	if err != nil {
 		return err
 	}
@@ -92,7 +78,7 @@ func (e *exploder) walkNode(
 	workOrderBySeq := make(map[int]int64, len(steps))
 	var prevWO *int64
 	for _, step := range steps {
-		woID, err := e.insertWorkOrder(ctx, orderID, step, qty, prevWO)
+		woID, err := e.insertWorkOrder(ctx, orderId, step, qty, prevWO)
 		if err != nil {
 			return err
 		}
@@ -120,7 +106,7 @@ func (e *exploder) walkNode(
 		child := items[ed.childItemID]
 		switch child.itemType {
 		case "make":
-			if err := e.walkNode(ctx, ed.childItemID, ed.childQty, orderID, items, bomHeaders, routingSteps, edgesByParent); err != nil {
+			if err := e.walkNode(ctx, ed.childItemID, ed.childQty, orderId, items, bomHeaders, routingSteps, edgesByParent); err != nil {
 				return err
 			}
 		case "buy":
@@ -129,3 +115,4 @@ func (e *exploder) walkNode(
 	}
 	return nil
 }
+
