@@ -84,8 +84,16 @@ fit — that's a legitimate exercise too, not a rule you're locked into.
   multiple of the item's `fixed_lot_size`.
 
 ### FR-5 — Backward Scheduling
-- FR-5.1 The plan's due date sets the due date of the root production order's *last* work
-  order.
+- FR-5.1 The plan's due date sets the due date of the **root** production order — the order
+  for the plan's own item, the one with `parent_order_id IS NULL` — and specifically of that
+  order's *last* routing step (highest `seq` in its `prev_work_order_id` chain).
+  "Root" here means the **top** of the pegging tree (the finished good), **not** the deepest
+  node in it. Every descendant order is scheduled *earlier*, because a child order supplies a
+  component its parent consumes and must therefore finish first: `parent_order_id` encodes
+  consumption, not execution order.
+  *(Clarified 2026-07-31: wording only, rule unchanged — the original phrasing, "the root
+  production order's last work order," was read as the last work order in the whole tree,
+  i.e. the deepest one. See `docs/concepts/day-04-scheduling.md`.)*
 - FR-5.2 Each work order's start = its due date − step duration (`setup_hours +
   hours_per_unit × qty`), walked backward across the plant's calendar, skipping holidays
   and non-working hours.
@@ -93,6 +101,10 @@ fit — that's a legitimate exercise too, not a rule you're locked into.
   order step that consumes it.
 - FR-5.4 A purchase request's `need_by` equals the start date of the earliest work order
   requiring that component.
+
+Net direction of the walk: start at the root order's last step, move *down* the pegging
+tree via FR-5.3, dates decreasing with depth. The deepest orders and purchase requests are
+scheduled earliest; the root completes last, on the plan's due date.
 
 ### FR-6 — Async Execution & Visibility
 - FR-6.1 An MRP run executes as a background job — the triggering HTTP request must not

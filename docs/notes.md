@@ -52,3 +52,13 @@ Rakshith. Kept separate from the notes above, which are.)*
 Naive first (Day 2, real measured baseline), CTE second (Day 3, optimized, measured again
 for a real before/after). Both sets of trade-offs are true at once; the point of building
 both is defending *both* decisions with real numbers, not just the winning one.
+
+- While writing or designing an algorithm for a problem.
+  - Algorithm efficacy.
+    - does the algorithm solve the business requirement
+  - Does algorithm have any known anti patterns.
+  - Future considerations.
+    - How would this algorithm fare if there is a specifcation change.
+      - Is it easily extendable or tightly coupled therefore increasing cost later on.
+      - It the algorithm time and space efficient is it scalable in nature or it only accounts for the current load and assumes that the current load is definite.
+
