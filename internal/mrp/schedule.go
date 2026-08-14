@@ -53,44 +53,52 @@ type scheduler struct {
 	scheduledOrderIDs    map[int64]bool
 }
 
-const ordersQuery = `
+const prodOrderQuery = `
 SELECT id, consuming_work_order_id
 FROM production_orders
 WHERE plan_id = $1
 `
 
 // Duration lives on routing_steps, not on work_orders, so it is joined back through the
-// order's item and the step's seq. FR-3.2 guarantees work_orders.seq == routing_steps.seq.
-const workOrdersQuery = `
+// order's item and the step's seq. FR-3.2 guarantees work_orders.seq == routing_steps.seq,
+// and matching on both routing_id and seq is what stops every step pairing with every
+// work order.
+const workOrderQuery = `
 SELECT w.id, w.production_order_id, w.seq, s.setup_hours + s.hours_per_unit * w.qty
-FROM work_orders     w
+FROM work_orders w
 JOIN production_orders o ON o.id = w.production_order_id
-JOIN routings          r ON r.item_id = o.item_id AND r.is_active
-JOIN routing_steps     s ON s.routing_id = r.id AND s.seq = w.seq
+JOIN routings r ON r.item_id = o.item_id AND r.is_active
+JOIN routing_steps s ON s.routing_id = r.id AND s.seq = w.seq
 WHERE o.plan_id = $1
 ORDER BY w.production_order_id, w.seq
 `
 
+// production_orders appears here only to reach plan_id; nothing is selected from it.
+// items must join on c.item_id (the component), not o.item_id (the item being made) —
+// every production order's own item is a make item, so the latter returns nothing.
 const buyRequirementsQuery = `
 SELECT c.work_order_id, c.item_id
 FROM component_requirements c
-JOIN work_orders       w ON w.id = c.work_order_id
+JOIN work_orders w ON w.id = c.work_order_id
 JOIN production_orders o ON o.id = w.production_order_id
-JOIN items             i ON i.id = c.item_id
+JOIN items i ON i.id = c.item_id
 WHERE o.plan_id = $1 AND i.item_type = 'buy'
 `
 
-const updateWorkOrdersStmt = `
+// One statement per table instead of one per row: the three parallel arrays are zipped by
+// unnest into a joinable table. They must stay the same length — unnest pads a short array
+// with NULLs rather than erroring.
+const updateWorkOrder = `
 UPDATE work_orders w
 SET planned_start = v.ps, planned_end = v.pe
-FROM unnest($1::bigint[], $2::timestamptz[], $3::timestamptz[]) AS v(id, ps, pe)
+FROM unnest($1::bigint[],$2::timestamptz[],$3::timestamptz[]) AS v(id, ps, pe)
 WHERE w.id = v.id
 `
 
-const updateOrdersStmt = `
+const updateProdOrder = `
 UPDATE production_orders o
 SET due_date = v.due, start_date = v.start
-FROM unnest($1::bigint[], $2::timestamptz[], $3::timestamptz[]) AS v(id, due, start)
+FROM unnest($1::bigint[],$2::timestamptz[],$3::timestamptz[]) AS v(id, due, start)
 WHERE o.id = v.id
 `
 
@@ -211,7 +219,7 @@ func (s *scheduler) load(ctx context.Context) error {
 	s.earliestNeedByItemID = map[int64]time.Time{}
 	s.scheduledOrderIDs = map[int64]bool{}
 
-	rows, err := s.tx.Query(ctx, ordersQuery, s.planID)
+	rows, err := s.tx.Query(ctx, prodOrderQuery, s.planID)
 	if err != nil {
 		return err
 	}
@@ -235,7 +243,7 @@ func (s *scheduler) load(ctx context.Context) error {
 
 	var totalWork time.Duration
 
-	rows, err = s.tx.Query(ctx, workOrdersQuery, s.planID)
+	rows, err = s.tx.Query(ctx, workOrderQuery, s.planID)
 	if err != nil {
 		return err
 	}
@@ -288,7 +296,7 @@ func (s *scheduler) flush(ctx context.Context) error {
 		}
 	}
 	if len(woIDs) > 0 {
-		if _, err := s.tx.Exec(ctx, updateWorkOrdersStmt, woIDs, woStarts, woEnds); err != nil {
+		if _, err := s.tx.Exec(ctx, updateWorkOrder, woIDs, woStarts, woEnds); err != nil {
 			return fmt.Errorf("update work orders: %w", err)
 		}
 	}
@@ -301,7 +309,7 @@ func (s *scheduler) flush(ctx context.Context) error {
 		dues = append(dues, o.due)
 		starts = append(starts, o.start)
 	}
-	if _, err := s.tx.Exec(ctx, updateOrdersStmt, orderIDs, dues, starts); err != nil {
+	if _, err := s.tx.Exec(ctx, updateProdOrder, orderIDs, dues, starts); err != nil {
 		return fmt.Errorf("update production orders: %w", err)
 	}
 	return nil
