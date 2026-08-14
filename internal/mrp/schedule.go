@@ -105,11 +105,12 @@ WHERE o.id = v.id
 // schedule runs the backward pass and hands the purchase-request dates back to the exploder
 // so netting can use them.
 func (e *exploder) schedule(ctx context.Context) error {
-	s := &scheduler{tx: e.tx, planID: e.planID, planDue: e.dueDate}
-	if err := s.run(ctx); err != nil {
+	scheduler := &scheduler{tx: e.tx, planID: e.planID, planDue: e.dueDate}
+	if err := scheduler.run(ctx); err != nil {
 		return err
 	}
-	e.earliestNeedByItemID = s.earliestNeedByItemID
+
+	e.earliestNeedByItemID = scheduler.earliestNeedByItemID
 	return nil
 }
 
@@ -118,11 +119,12 @@ func (e *exploder) schedule(ctx context.Context) error {
 // floored DOWN because rounding up would ask for delivery after the step already started.
 // Falls back to the plan due date only if scheduling never saw the item.
 func (e *exploder) needByFor(itemID int64) time.Time {
-	t, ok := e.earliestNeedByItemID[itemID]
+	needBy, ok := e.earliestNeedByItemID[itemID]
 	if !ok {
 		return e.dueDate
 	}
-	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+
+	return time.Date(needBy.Year(), needBy.Month(), needBy.Day(), 0, 0, 0, 0, needBy.Location())
 }
 
 func (s *scheduler) run(ctx context.Context) error {
