@@ -319,10 +319,12 @@ func (s *scheduler) flush(ctx context.Context) error {
 
 // endOfDay puts the plan's due DATE at the plant's closing time, since a plan due "on
 // day 10" means by the end of day 10.
-func endOfDay(day time.Time, cal *calendar) time.Time {
-	d := truncateDay(day)
-	// Every interval shares the same daily window, so the last one gives the closing time.
-	last := cal.intervals[len(cal.intervals)-1]
-	closing := last.end.Sub(truncateDay(last.end))
-	return d.Add(closing)
+func endOfDay(due time.Time, cal *calendar) time.Time {
+	// gets the due date from midnight.
+	midNightDue := truncateDay(due)
+
+	// Every interval shares the same daily window, so any of them gives the closing time.
+	randomInterval := cal.intervals[0]
+	closingDifference := randomInterval.end.Sub(truncateDay(randomInterval.end))
+	return midNightDue.Add(closingDifference)
 }
