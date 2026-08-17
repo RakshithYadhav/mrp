@@ -215,37 +215,19 @@ func (s *scheduler) scheduleOrder(orderID int64, due time.Time) error {
 
 func (s *scheduler) load(ctx context.Context) error {
 	s.productionOrdersByID = map[int64]*scheduledProductionOrder{}
-	s.workOrdersByProductionOrderID = map[int64][]*scheduledWorkOrder{}
-	s.childOrderIDsByWorkOrderID = map[int64][]int64{}
-	s.buyItemIDsByWorkOrderID = map[int64][]int64{}
-	s.earliestNeedByItemID = map[int64]time.Time{}
+	s.workOrdersByProductionOrderID = map[int64][]*scheduledWorkOrder{} // ascending seq
+	s.childOrderIDsByWorkOrderID = map[int64][]int64{}                  // work order -> child order ids
+	s.buyItemIDsByWorkOrderID = map[int64][]int64{}                     // work order -> buy item ids
+	s.earliestNeedByItemID = map[int64]time.Time{}                      // FR-5.4, plan-scoped, keyed by item
 	s.scheduledOrderIDs = map[int64]bool{}
 
-	rows, err := s.tx.Query(ctx, prodOrderQuery, s.planID)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var o scheduledProductionOrder
-		if err := rows.Scan(&o.id, &o.consumedBy); err != nil {
-			rows.Close()
-			return err
-		}
-		s.productionOrdersByID[o.id] = &o
-		if o.consumedBy == nil {
-			s.rootProductionOrderID = o.id
-		} else {
-			s.childOrderIDsByWorkOrderID[*o.consumedBy] = append(s.childOrderIDsByWorkOrderID[*o.consumedBy], o.id)
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+	if err := s.loadProductionOrders(ctx); err != nil {
 		return err
 	}
 
 	var totalWork time.Duration
 
-	rows, err = s.tx.Query(ctx, workOrderQuery, s.planID)
+	rows, err := s.tx.Query(ctx, workOrderQuery, s.planID)
 	if err != nil {
 		return err
 	}
@@ -327,4 +309,32 @@ func endOfDay(due time.Time, cal *calendar) time.Time {
 	randomInterval := cal.intervals[0]
 	closingDifference := randomInterval.end.Sub(truncateDay(randomInterval.end))
 	return midNightDue.Add(closingDifference)
+}
+
+func (s *scheduler) loadProductionOrders(ctx context.Context) error {
+	rows, err := s.tx.Query(ctx, prodOrderQuery, s.planID)
+	if err != nil {
+		return err
+	}
+
+	for rows.Next() {
+		var prodOrder scheduledProductionOrder
+		if err := rows.Scan(&prodOrder.id, &prodOrder.consumedBy); err != nil {
+			rows.Close()
+			return err
+		}
+
+		s.productionOrdersByID[prodOrder.id] = &prodOrder
+		if prodOrder.consumedBy == nil {
+			s.rootProductionOrderID = prodOrder.id
+		} else {
+			s.childOrderIDsByWorkOrderID[*prodOrder.consumedBy] = append(s.childOrderIDsByWorkOrderID[*prodOrder.consumedBy], prodOrder.id)
+		}
+	}
+
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return nil
 }
