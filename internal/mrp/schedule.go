@@ -51,6 +51,10 @@ type scheduler struct {
 
 	earliestNeedByItemID map[int64]time.Time // FR-5.4, plan-scoped, keyed by item
 	scheduledOrderIDs    map[int64]bool
+
+	// Summed while loading work orders; the only input to the calendar's horizon, which is
+	// why loadCalendar has to run after every duration has been read.
+	totalWork time.Duration
 }
 
 const prodOrderQuery = `
@@ -225,29 +229,11 @@ func (s *scheduler) load(ctx context.Context) error {
 		return err
 	}
 
-	var totalWork time.Duration
-
-	rows, err := s.tx.Query(ctx, workOrderQuery, s.planID)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var wo scheduledWorkOrder
-		var hours float64
-		if err := rows.Scan(&wo.id, &wo.orderID, &wo.seq, &hours); err != nil {
-			rows.Close()
-			return err
-		}
-		wo.duration = time.Duration(hours * float64(time.Hour))
-		totalWork += wo.duration
-		s.workOrdersByProductionOrderID[wo.orderID] = append(s.workOrdersByProductionOrderID[wo.orderID], &wo)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+	if err := s.loadWorkOrders(ctx); err != nil {
 		return err
 	}
 
-	rows, err = s.tx.Query(ctx, buyRequirementsQuery, s.planID)
+	rows, err := s.tx.Query(ctx, buyRequirementsQuery, s.planID)
 	if err != nil {
 		return err
 	}
@@ -264,7 +250,7 @@ func (s *scheduler) load(ctx context.Context) error {
 		return err
 	}
 
-	s.cal, err = loadCalendar(ctx, s.tx, s.planID, s.planDue, totalWork)
+	s.cal, err = loadCalendar(ctx, s.tx, s.planID, s.planDue, s.totalWork)
 	return err
 }
 
@@ -336,5 +322,34 @@ func (s *scheduler) loadProductionOrders(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	return nil
+}
+
+func (s *scheduler) loadWorkOrders(ctx context.Context) error {
+	rows, err := s.tx.Query(ctx, workOrderQuery, s.planID)
+	if err != nil {
+		return err
+	}
+
+	for rows.Next() {
+		var workOrder scheduledWorkOrder
+		var hours float64
+		if err := rows.Scan(&workOrder.id, &workOrder.orderID, &workOrder.seq, &hours); err != nil {
+			rows.Close()
+			return err
+		}
+
+		// time.Duration counts nanoseconds, so multiply in float space before converting —
+		// time.Duration(hours) * time.Hour would truncate 2.5h to 2h.
+		workOrder.duration = time.Duration(hours * float64(time.Hour))
+		s.totalWork += workOrder.duration
+		s.workOrdersByProductionOrderID[workOrder.orderID] = append(s.workOrdersByProductionOrderID[workOrder.orderID], &workOrder)
+	}
+
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
 	return nil
 }
