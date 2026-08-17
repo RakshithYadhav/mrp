@@ -135,6 +135,7 @@ func (s *scheduler) run(ctx context.Context) error {
 	if err := s.load(ctx); err != nil {
 		return err
 	}
+
 	if s.rootProductionOrderID == 0 {
 		return fmt.Errorf("plan %d has no root production order", s.planID)
 	}
@@ -240,7 +241,7 @@ func (s *scheduler) load(ctx context.Context) error {
 	// Last: the horizon argument is s.totalWork, which only exists once every work order
 	// duration above has been read.
 	cal, err := loadCalendar(ctx, s.tx, s.planID, s.planDue, s.totalWork)
-	
+
 	if err != nil {
 		return err
 	}
