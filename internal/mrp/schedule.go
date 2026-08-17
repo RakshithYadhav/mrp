@@ -233,25 +233,42 @@ func (s *scheduler) load(ctx context.Context) error {
 		return err
 	}
 
+	if err := s.loadBuyRequirements(ctx); err != nil {
+		return err
+	}
+
+	// Last: the horizon argument is s.totalWork, which only exists once every work order
+	// duration above has been read.
+	cal, err := loadCalendar(ctx, s.tx, s.planID, s.planDue, s.totalWork)
+	
+	if err != nil {
+		return err
+	}
+	s.cal = cal
+
+	return nil
+}
+
+func (s *scheduler) loadBuyRequirements(ctx context.Context) error {
 	rows, err := s.tx.Query(ctx, buyRequirementsQuery, s.planID)
 	if err != nil {
 		return err
 	}
+
 	for rows.Next() {
-		var woID, itemID int64
-		if err := rows.Scan(&woID, &itemID); err != nil {
+		var woId, itemId int64
+		if err := rows.Scan(&woId, &itemId); err != nil {
 			rows.Close()
 			return err
 		}
-		s.buyItemIDsByWorkOrderID[woID] = append(s.buyItemIDsByWorkOrderID[woID], itemID)
+
+		s.buyItemIDsByWorkOrderID[woId] = append(s.buyItemIDsByWorkOrderID[woId], itemId)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
-
-	s.cal, err = loadCalendar(ctx, s.tx, s.planID, s.planDue, s.totalWork)
-	return err
+	return nil
 }
 
 func (s *scheduler) flush(ctx context.Context) error {
