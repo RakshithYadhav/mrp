@@ -172,7 +172,7 @@ func (s *scheduler) run(ctx context.Context) error {
 // consumes. Steps are walked tail first; cursor carries each step's start down to its
 // predecessor's end, which is the precedence rule of FR-5.2.
 func (s *scheduler) scheduleOrder(orderID int64, due time.Time) error {
-	ord, ok := s.productionOrdersByID[orderID]
+	order, ok := s.productionOrdersByID[orderID]
 	if !ok {
 		return fmt.Errorf("production order %d not in plan %d", orderID, s.planID)
 	}
@@ -180,34 +180,35 @@ func (s *scheduler) scheduleOrder(orderID int64, due time.Time) error {
 		return fmt.Errorf("production order %d visited twice; pegging tree is not a tree", orderID)
 	}
 	s.scheduledOrderIDs[orderID] = true
-
-	ord.due = due
+	order.due = due
 	cursor := due
 
-	steps := s.workOrdersByProductionOrderID[orderID]
-	for i := len(steps) - 1; i >= 0; i-- {
-		wo := steps[i]
+	// Tail first: the order's due date belongs to its LAST step, and each step's start
+	// becomes its predecessor's end. cursor carries that chain (FR-5.2).
+	workOrders := s.workOrdersByProductionOrderID[orderID]
+	for i := len(workOrders) - 1; i >= 0; i-- {
+		workOrder := workOrders[i]
 
 		end, err := s.cal.snapBack(cursor)
 		if err != nil {
-			return fmt.Errorf("work order %d: %w", wo.id, err)
+			return fmt.Errorf("work order %d: %w", workOrder.id, err)
 		}
-		start, err := s.cal.minusWorkingDuration(end, wo.duration)
+		start, err := s.cal.minusWorkingDuration(end, workOrder.duration)
 		if err != nil {
-			return fmt.Errorf("work order %d: %w", wo.id, err)
+			return fmt.Errorf("work order %d: %w", workOrder.id, err)
 		}
-		wo.end, wo.start = end, start
+		workOrder.end, workOrder.start = end, start
 
-		// FR-5.3: a step may consume zero, one or many child orders. Each is due when this
-		// step starts — not when the order's first step starts.
-		for _, childID := range s.childOrderIDsByWorkOrderID[wo.id] {
+		// FR-5.3: a step consumes zero, one or many child orders. Each is due when THIS
+		// step starts, not when the order's first step starts.
+		for _, childID := range s.childOrderIDsByWorkOrderID[workOrder.id] {
 			if err := s.scheduleOrder(childID, start); err != nil {
 				return err
 			}
 		}
 
-		// FR-5.4: earliest start across every work order in the plan requiring the item.
-		for _, itemID := range s.buyItemIDsByWorkOrderID[wo.id] {
+		// FR-5.4: running minimum across every work order in the plan needing the item.
+		for _, itemID := range s.buyItemIDsByWorkOrderID[workOrder.id] {
 			if cur, ok := s.earliestNeedByItemID[itemID]; !ok || start.Before(cur) {
 				s.earliestNeedByItemID[itemID] = start
 			}
@@ -216,7 +217,7 @@ func (s *scheduler) scheduleOrder(orderID int64, due time.Time) error {
 		cursor = start
 	}
 
-	ord.start = cursor // first step's start, or the due date for an order with no routing
+	order.start = cursor
 	return nil
 }
 
