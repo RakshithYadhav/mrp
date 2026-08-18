@@ -52,9 +52,11 @@ type scheduler struct {
 	earliestNeedByItemID map[int64]time.Time // FR-5.4, plan-scoped, keyed by item
 	scheduledOrderIDs    map[int64]bool
 
-	// Summed while loading work orders; the only input to the calendar's horizon, which is
-	// why loadCalendar has to run after every duration has been read.
-	totalWork time.Duration
+	// Both summed while loading work orders. totalWork is the only input to the calendar's
+	// horizon, which is why loadCalendar has to run after every duration has been read;
+	// workOrderCount sizes the flush arrays exactly instead of guessing.
+	totalWork      time.Duration
+	workOrderCount int
 }
 
 const prodOrderQuery = `
@@ -272,34 +274,50 @@ func (s *scheduler) loadBuyRequirements(ctx context.Context) error {
 	return nil
 }
 
+// flush is the only place the walk touches the database. Everything before it is in-memory
+// arithmetic, so a failure anywhere in the tree leaves no partial dates behind.
+//
+// Two statements total, one per table, not one per row.
 func (s *scheduler) flush(ctx context.Context) error {
-	woIDs := make([]int64, 0, len(s.productionOrdersByID)*3)
-	woStarts := make([]time.Time, 0, cap(woIDs))
-	woEnds := make([]time.Time, 0, cap(woIDs))
-	for _, steps := range s.workOrdersByProductionOrderID {
-		for _, wo := range steps {
-			woIDs = append(woIDs, wo.id)
-			woStarts = append(woStarts, wo.start)
-			woEnds = append(woEnds, wo.end)
+	// update work orders
+	workOrderIds := make([]int64, 0, s.workOrderCount)
+	woStarts := make([]time.Time, 0, s.workOrderCount)
+	woEnds := make([]time.Time, 0, s.workOrderCount)
+
+	// All three appends stay in one loop body: unnest pads a short array with NULLs instead
+	// of erroring, so arrays drifting out of step would silently blank a real column.
+	for _, workOrders := range s.workOrdersByProductionOrderID {
+		for _, workOrder := range workOrders {
+			workOrderIds = append(workOrderIds, workOrder.id)
+			woStarts = append(woStarts, workOrder.start)
+			woEnds = append(woEnds, workOrder.end)
 		}
 	}
-	if len(woIDs) > 0 {
-		if _, err := s.tx.Exec(ctx, updateWorkOrder, woIDs, woStarts, woEnds); err != nil {
+	if len(workOrderIds) > 0 {
+		if _, err := s.tx.Exec(ctx, updateWorkOrder, workOrderIds, woStarts, woEnds); err != nil {
 			return fmt.Errorf("update work orders: %w", err)
 		}
 	}
 
-	orderIDs := make([]int64, 0, len(s.productionOrdersByID))
-	dues := make([]time.Time, 0, len(s.productionOrdersByID))
-	starts := make([]time.Time, 0, len(s.productionOrdersByID))
-	for id, o := range s.productionOrdersByID {
-		orderIDs = append(orderIDs, id)
-		dues = append(dues, o.due)
-		starts = append(starts, o.start)
+	// update production orders
+	prdOrderIds := make([]int64, 0, len(s.productionOrdersByID))
+	prdDues := make([]time.Time, 0, len(s.productionOrdersByID))
+	prdStarts := make([]time.Time, 0, len(s.productionOrdersByID))
+
+	// Map iteration order is random in Go, and that is fine here: every row carries its own
+	// id, so the UPDATE lands identically whatever order the arrays are built in.
+	for _, order := range s.productionOrdersByID {
+		prdOrderIds = append(prdOrderIds, order.id)
+		prdDues = append(prdDues, order.due)
+		prdStarts = append(prdStarts, order.start)
 	}
-	if _, err := s.tx.Exec(ctx, updateProdOrder, orderIDs, dues, starts); err != nil {
-		return fmt.Errorf("update production orders: %w", err)
+
+	if len(prdOrderIds) > 0 {
+		if _, err := s.tx.Exec(ctx, updateProdOrder, prdOrderIds, prdDues, prdStarts); err != nil {
+			return fmt.Errorf("update production orders: %w", err)
+		}
 	}
+
 	return nil
 }
 
@@ -361,6 +379,7 @@ func (s *scheduler) loadWorkOrders(ctx context.Context) error {
 		// time.Duration(hours) * time.Hour would truncate 2.5h to 2h.
 		workOrder.duration = time.Duration(hours * float64(time.Hour))
 		s.totalWork += workOrder.duration
+		s.workOrderCount++
 		s.workOrdersByProductionOrderID[workOrder.orderID] = append(s.workOrdersByProductionOrderID[workOrder.orderID], &workOrder)
 	}
 
