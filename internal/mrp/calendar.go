@@ -131,7 +131,7 @@ func buildCalendar(from, to time.Time, workStart, workEnd time.Duration, holiday
 		return nil, fmt.Errorf("plant work_end %s is not after work_start %s", workEnd, workStart)
 	}
 
-	var out []interval
+	var intervals []interval
 	for day := truncateDay(from); !day.After(truncateDay(to)); day = day.AddDate(0, 0, 1) {
 		switch day.Weekday() {
 		case time.Saturday, time.Sunday:
@@ -140,13 +140,13 @@ func buildCalendar(from, to time.Time, workStart, workEnd time.Duration, holiday
 		if holidays[day] {
 			continue
 		}
-		out = append(out, interval{start: day.Add(workStart), end: day.Add(workEnd)})
+		intervals = append(intervals, interval{start: day.Add(workStart), end: day.Add(workEnd)})
 	}
-	if len(out) == 0 {
+	if len(intervals) == 0 {
 		return nil, fmt.Errorf("%w: no working days in %s..%s",
 			ErrOutsideHorizon, from.Format(time.DateOnly), to.Format(time.DateOnly))
 	}
-	return &calendar{intervals: out}, nil
+	return &calendar{intervals: intervals}, nil
 }
 
 func truncateDay(t time.Time) time.Time {
