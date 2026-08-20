@@ -48,14 +48,15 @@ func (c *calendar) locate(t time.Time) (int, error) {
 // It only ever moves backward, and it is only ever applied to END moments. A due moment
 // that moved later would finish after the step that depends on it has already started.
 func (c *calendar) snapBack(t time.Time) (time.Time, error) {
-	i, err := c.locate(t)
+	interval, err := c.locate(t)
 	if err != nil {
 		return time.Time{}, err
 	}
-	if t.Before(c.intervals[i].end) {
+	if t.Before(c.intervals[interval].end) {
 		return t, nil
 	}
-	return c.intervals[i].end, nil
+
+	return c.intervals[interval].end, nil
 }
 
 // minusWorkingDuration returns the moment exactly d of WORKING time before end.
