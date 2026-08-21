@@ -60,13 +60,7 @@ func (c *calendar) snapBack(t time.Time) (time.Time, error) {
 }
 
 // minusWorkingDuration returns the moment exactly d of WORKING time before end.
-//
-// This is the whole point of the design. The obvious version — end.Add(-d) followed by a
-// snap back into working hours — cannot work: clock subtraction spends duration on hours
-// the plant is closed, and the snap has no way to know how much was lost, because it only
-// receives a moment. Consuming interval by interval conserves the duration by construction,
-// and as a free consequence the result always lands on a working moment, so the start never
-// needs snapping at all.
+// if this must be finished by X, and it takes N hours of work, when do I start?
 func (c *calendar) minusWorkingDuration(end time.Time, d time.Duration) (time.Time, error) {
 	if d < 0 {
 		return time.Time{}, fmt.Errorf("negative duration %s", d)
@@ -77,21 +71,23 @@ func (c *calendar) minusWorkingDuration(end time.Time, d time.Duration) (time.Ti
 		return time.Time{}, err
 	}
 	i, err := c.locate(m)
+
 	if err != nil {
 		return time.Time{}, err
 	}
 
 	remaining := d
 	for {
-		// Working time available inside this interval, before m.
-		avail := m.Sub(c.intervals[i].start)
-		if avail >= remaining {
+		// Working time inside this interval, before m. On the first pass m is the deadline
+		// itself so this is a partial day; afterwards m is an interval's close, so a full one.
+		available := m.Sub(c.intervals[i].start)
+		if available >= remaining {
 			return m.Add(-remaining), nil
 		}
-		remaining -= avail
+		remaining -= available
 
-		// Jump over the closed gap to the end of the previous working interval.
-		// The gap itself consumes nothing — that is what makes the duration hold.
+		// Go back to previous interval. The closed gap in between consumes nothing, which
+		// is what makes the duration come out exact.
 		i--
 		if i < 0 {
 			return time.Time{}, fmt.Errorf(
