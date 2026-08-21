@@ -53,6 +53,10 @@ func (s *Service) ExplodeOptimized(ctx context.Context, planID int64) (Result, e
 		return Result{}, err
 	}
 
+	if err := ex.schedule(ctx); err != nil {
+		return Result{}, err
+	}
+
 	purchaseCount, err := ex.netOptimized(ctx)
 	if err != nil {
 		return Result{}, err

@@ -35,6 +35,9 @@ type exploder struct {
 	path    map[int64]bool
 	buyReqs map[int64]float64
 
+	// Filled by the backward scheduling pass (FR-5.4) and read by netting.
+	earliestNeedByItemID map[int64]time.Time
+
 	countProdOrders    int
 	countWorkOrders    int
 	countComponentReqs int
@@ -61,7 +64,10 @@ type routingStep struct {
 	resourceID *int64
 }
 
-func (e *exploder) explode(ctx context.Context, item item, qty float64, parentOrderId int64) error {
+// consumingWorkOrderId is the parent routing step that consumes this item (FR-5.3); zero
+// for the root. It is recorded now because this is the only point where it is known —
+// see 0002_scheduling.sql for why deriving it later is ambiguous.
+func (e *exploder) explode(ctx context.Context, item item, qty float64, parentOrderId, consumingWorkOrderId int64) error {
 	if e.path[item.id] {
 		return fmt.Errorf("%w : item %d", ErrCycle, item.id)
 	}
@@ -75,7 +81,7 @@ func (e *exploder) explode(ctx context.Context, item item, qty float64, parentOr
 	}
 
 	// production orders.
-	orderId, err := e.insertProductionOrder(ctx, item.id, bomHeaderId, hasBom, qty, parentOrderId)
+	orderId, err := e.insertProductionOrder(ctx, item.id, bomHeaderId, hasBom, qty, parentOrderId, consumingWorkOrderId)
 	if err != nil {
 		return err
 	}
@@ -131,10 +137,10 @@ func (e *exploder) explode(ctx context.Context, item item, qty float64, parentOr
 		if err != nil {
 			return err
 		}
-		
+
 		switch child.itemType {
 		case "make":
-			if err := e.explode(ctx, child, childQty, orderId); err != nil {
+			if err := e.explode(ctx, child, childQty, orderId, workOrderId); err != nil {
 				return err
 			}
 		case "buy":
@@ -192,7 +198,7 @@ func (e *exploder) bomHeaderFor(ctx context.Context, itemID int64) (int64, bool,
 }
 
 func (e *exploder) routingSteps(ctx context.Context, itemID int64) ([]routingStep, error) {
-	rows, err := e.tx.Query(ctx,`
+	rows, err := e.tx.Query(ctx, `
 		SELECT s.seq, s.name, s.resource_id
 		FROM routings r
 		JOIN routing_steps s ON s.routing_id = r.id
@@ -220,40 +226,50 @@ func (e *exploder) insertWorkOrder(ctx context.Context, orderId int64, step rout
 	INSERT INTO work_orders (production_order_id, seq, name, resource_id, qty, prev_work_order_id)
 	VALUES ($1,$2,$3,$4,$5,$6)
 	RETURNING id`,
-	orderId, step.seq, step.name, step.resourceID, qty, prevWO).Scan(&workOrderId)
+		orderId, step.seq, step.name, step.resourceID, qty, prevWO).Scan(&workOrderId)
 	return workOrderId, err
 }
 
 func (e *exploder) insertProductionOrder(
-	ctx context.Context, 
-	itemID int64, 
-	bomHeaderId int64 ,
-	hasBom bool, 
-	qty float64, 
-	parentOrderId int64) (int64, error) {
+	ctx context.Context,
+	itemID int64,
+	bomHeaderId int64,
+	hasBom bool,
+	qty float64,
+	parentOrderId int64,
+	consumingWorkOrderId int64) (int64, error) {
 
-		var header any
-		if hasBom {
-			header = bomHeaderId
-		}
+	var header any
+	if hasBom {
+		header = bomHeaderId
+	}
 
-		var parent any
-		if parentOrderId != 0 {
-			parent = parentOrderId
-		}
+	var parent any
+	if parentOrderId != 0 {
+		parent = parentOrderId
+	}
 
-		var prodOrderId int64
-		err := e.tx.QueryRow(ctx,`INSERT INTO production_orders (plan_id, parent_order_id, item_id, bom_header_id, qty, due_date)
-							VALUES ($1, $2, $3, $4, $5, $6)
+	// FR-5.3: which parent routing step consumes this order's output. Null on the root.
+	var consumedBy any
+	if consumingWorkOrderId != 0 {
+		consumedBy = consumingWorkOrderId
+	}
+
+	// due_date is a placeholder here; the backward scheduling pass overwrites every
+	// order's dates once the whole tree exists.
+	var prodOrderId int64
+	err := e.tx.QueryRow(ctx, `INSERT INTO production_orders (plan_id, parent_order_id, item_id, bom_header_id, qty, due_date, consuming_work_order_id)
+							VALUES ($1, $2, $3, $4, $5, $6, $7)
 							RETURNING id`,
-							e.planID,
-							parent,
-							itemID,
-							header,
-							qty,
-							e.dueDate).Scan(&prodOrderId)
-		
-		return prodOrderId, err
+		e.planID,
+		parent,
+		itemID,
+		header,
+		qty,
+		e.dueDate,
+		consumedBy).Scan(&prodOrderId)
+
+	return prodOrderId, err
 }
 
 func (e *exploder) insertComponentReq(ctx context.Context, workOrderID, itemID int64, qty float64) error {

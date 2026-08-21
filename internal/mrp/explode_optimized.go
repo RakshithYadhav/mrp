@@ -53,14 +53,16 @@ func (e *exploder) explodeOptimized(ctx context.Context, root item, qty float64)
 		edgesByParent[ed.parentItemId] = append(edgesByParent[ed.parentItemId], ed)
 	}
 
-	return e.walkNode(ctx, root.id, qty, 0, items, bomHeaders, routingSteps, edgesByParent)
+	return e.walkNode(ctx, root.id, qty, 0, 0, items, bomHeaders, routingSteps, edgesByParent)
 }
 
+// consumingWorkOrderID is the parent routing step consuming this item (FR-5.3); zero at the root.
 func (e *exploder) walkNode(
 	ctx context.Context,
 	itemID int64,
 	qty float64,
 	parentOrderID int64,
+	consumingWorkOrderID int64,
 	items map[int64]item,
 	bomHeaders map[int64]int64,
 	routingSteps map[int64][]routingStep,
@@ -68,7 +70,7 @@ func (e *exploder) walkNode(
 ) error {
 	bomHeaderID, hasBom := bomHeaders[itemID]
 
-	orderId, err := e.insertProductionOrder(ctx, itemID, bomHeaderID, hasBom, qty, parentOrderID)
+	orderId, err := e.insertProductionOrder(ctx, itemID, bomHeaderID, hasBom, qty, parentOrderID, consumingWorkOrderID)
 	if err != nil {
 		return err
 	}
@@ -106,7 +108,7 @@ func (e *exploder) walkNode(
 		child := items[ed.childItemID]
 		switch child.itemType {
 		case "make":
-			if err := e.walkNode(ctx, ed.childItemID, ed.childQty, orderId, items, bomHeaders, routingSteps, edgesByParent); err != nil {
+			if err := e.walkNode(ctx, ed.childItemID, ed.childQty, orderId, workOrderID, items, bomHeaders, routingSteps, edgesByParent); err != nil {
 				return err
 			}
 		case "buy":

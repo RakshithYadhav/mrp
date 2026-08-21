@@ -63,7 +63,7 @@ func (e *exploder) netOptimized(ctx context.Context) (int, error) {
 		if it.lotSizeRule == "fixed" && it.fixedLotSize != nil && *it.fixedLotSize > 0 {
 			net = math.Ceil(net / *it.fixedLotSize) * *it.fixedLotSize
 		}
-		if _, err := e.tx.Exec(ctx, insertPurchaceRequest, e.planID, itemID, net, e.dueDate); err != nil {
+		if _, err := e.tx.Exec(ctx, insertPurchaceRequest, e.planID, itemID, net, e.needByFor(itemID)); err != nil {
 			return count, err
 		}
 		count++

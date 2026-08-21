@@ -88,7 +88,13 @@ func (s *Service) Explode(ctx context.Context, planID int64) (Result, error) {
 		return Result{}, fmt.Errorf("%w: item %d", ErrNotMakeItem, plan.itemID)
 	}
 
-	if err := ex.explode(ctx, root, plan.qty, 0); err != nil {
+	if err := ex.explode(ctx, root, plan.qty, 0, 0); err != nil {
+		return Result{}, err
+	}
+
+	// FR-5: backward scheduling runs after the tree exists and before netting, because a
+	// purchase request's need_by is a scheduling output (FR-5.4).
+	if err := ex.schedule(ctx); err != nil {
 		return Result{}, err
 	}
 

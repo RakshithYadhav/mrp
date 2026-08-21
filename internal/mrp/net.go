@@ -59,7 +59,7 @@ func (e *exploder) net(ctx context.Context) (int, error) {
 			e.planID,
 			itemID,
 			net,
-			e.dueDate); err != nil {
+			e.needByFor(itemID)); err != nil {
 			return count, err
 		}
 		count++
